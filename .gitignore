@@ -42,3 +42,5 @@ tmp/
 *.swp
 .DS_Store
 Thumbs.db
+
+hubert_emotion_vad_30hrs_jit.pt

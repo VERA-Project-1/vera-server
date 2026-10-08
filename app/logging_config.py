@@ -16,7 +16,7 @@ class RequestIdFilter(logging.Filter):
 
 
 # Chatty third-party loggers: HF hub checks, httpx request lines, file locks.
-NOISY_LOGGERS = ("httpx", "httpcore", "huggingface_hub", "urllib3", "filelock", "numba", "transformers")
+NOISY_LOGGERS = ("multipart", "python_multipart")
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -48,11 +48,9 @@ def setup_logging(level: str = "INFO") -> None:
                 # Replaced by the richer per-request line from the middleware.
                 "uvicorn.access": {"handlers": [], "level": "WARNING", "propagate": False},
                 **{name: {"level": "WARNING"} for name in NOISY_LOGGERS},
-                # Only emits the "set HF_TOKEN" nag at WARNING.
-                "huggingface_hub": {"level": "ERROR"},
             },
             "root": {"handlers": ["console"], "level": "WARNING"},
         }
     )
-    # Route warnings.warn() (e.g. torch deprecations) through the same formatter.
+    # Route warnings.warn() through the same formatter.
     logging.captureWarnings(True)

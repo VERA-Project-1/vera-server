@@ -1,11 +1,7 @@
-# CPU-only torch keeps the install small; drop the index line for a CUDA build.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.0
+onnxruntime==1.30.0
 numpy==2.5.3
 fastapi==0.141.1
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-transformers==5.17.0
-librosa==1.0.0
 pydub==0.25.1
 audioop-lts==0.2.2; python_version >= "3.13"

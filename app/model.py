@@ -3,9 +3,10 @@ import pickle
 import time
 from pathlib import Path
 
-import torch
+import numpy as np
+import onnxruntime as ort
 
-from app.config import TRUST_EMOTION_PRIOR
+from app.config import INFERENCE_THREADS, TRUST_EMOTION_PRIOR
 
 logger = logging.getLogger("vera.model")
 
@@ -38,29 +39,36 @@ def load_labels(path: Path) -> dict[int, str]:
 
 
 class EmotionModel:
-    def __init__(self, model_path: Path, label_encoder_path: Path, device: str | None = None):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, model_path: Path, label_encoder_path: Path):
+        self.device = "cpu"
         start = time.perf_counter()
-        self.model = torch.jit.load(str(model_path), map_location=self.device)
-        self.model.eval()
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = INFERENCE_THREADS
+        options.inter_op_num_threads = 1
+        # The arena and memory patterns keep peak-sized buffers alive between requests;
+        # without them memory drops back to ~230 MB after each prediction.
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
+        self.session = ort.InferenceSession(str(model_path), options, providers=["CPUExecutionProvider"])
         size_mb = model_path.stat().st_size / 1024**2
-        logger.info(f"Model {model_path.name} ({size_mb:.0f} MB) loaded on {self.device} in {time.perf_counter() - start:.1f}s")
+        logger.info(f"Model {model_path.name} ({size_mb:.0f} MB) loaded in {time.perf_counter() - start:.1f}s")
 
         self.idx_to_label = load_labels(label_encoder_path)
         logger.info(f"Labels {self.idx_to_label}")
 
-    def predict(self, input_values: torch.Tensor) -> dict:
-        with torch.inference_mode():
-            emotion_logits, vad_outputs = self.model(input_values.to(self.device))
+    def predict(self, input_values: np.ndarray) -> dict:
+        emotion_logits, vad_outputs = self.session.run(None, {"input_values": input_values})
 
-        probs = torch.softmax(emotion_logits, dim=1)[0]
-        emotion_pred_idx = int(torch.argmax(probs).item())
+        logits = emotion_logits[0]
+        probs = np.exp(logits - logits.max())
+        probs /= probs.sum()
+        emotion_pred_idx = int(np.argmax(probs))
         emotion_pred_label = self.idx_to_label[emotion_pred_idx]
-        emotion_confidence = probs[emotion_pred_idx].item()
+        emotion_confidence = float(probs[emotion_pred_idx])
 
-        valence = vad_outputs[0, 0].item()
-        arousal = vad_outputs[0, 1].item()
-        dominance = vad_outputs[0, 2].item()
+        valence = float(vad_outputs[0, 0])
+        arousal = float(vad_outputs[0, 1])
+        dominance = float(vad_outputs[0, 2])
 
         confidence = 0.5 * dominance + 0.3 * arousal + 0.2 * abs(valence - 0.5) * 2
         confidence = min(max(confidence, 0.0), 1.0)

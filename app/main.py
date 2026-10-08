@@ -1,18 +1,19 @@
 import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import torch
+import onnxruntime as ort
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import config
-from app.audio import convert_to_wav, load_processor, preprocess_audio
+from app import config, memory
+from app.audio import decode_audio, preprocess_audio
 from app.logging_config import request_id_var, setup_logging
 from app.model import EmotionModel
 
@@ -27,10 +28,10 @@ def _ms(start: float) -> float:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     start = time.perf_counter()
-    app.state.model = EmotionModel(config.MODEL_PATH, config.LABEL_ENCODER_PATH, config.DEVICE)
-    app.state.processor = load_processor()
+    app.state.model = EmotionModel(config.MODEL_PATH, config.LABEL_ENCODER_PATH)
     logger.info(
-        f"Ready in {_ms(start) / 1000:.1f}s | torch {torch.__version__} | device={app.state.model.device} "
+        f"Ready in {_ms(start) / 1000:.1f}s | memory {memory.fmt(memory.rss_mb())} "
+        f"| onnxruntime {ort.__version__} ({config.INFERENCE_THREADS} thread) "
         f"| labels={list(app.state.model.idx_to_label.values())} | cors={config.CORS_ORIGINS}"
     )
     yield
@@ -78,19 +79,31 @@ def health(request: Request):
     return {"status": "ok", "device": model.device, "labels": list(model.idx_to_label.values())}
 
 
-def _run_inference(model: EmotionModel, processor, data: bytes, suffix: str) -> dict:
-    t0 = time.perf_counter()
-    wav_path = convert_to_wav(data, suffix)
-    t_convert = _ms(t0)
-    try:
+# One inference at a time: concurrent requests would each hold their own activations and
+# multiply peak memory. Later requests wait for the lock instead.
+_inference_lock = threading.Lock()
+
+
+def _run_inference(model: EmotionModel, data: bytes, suffix: str) -> dict:
+    t_wait = time.perf_counter()
+    with _inference_lock:
+        waited = _ms(t_wait)
+        if waited > 50:
+            logger.info(f"Waited {waited:.0f} ms for a previous request to finish")
+        rss_before = memory.rss_mb()
+        memory.reset_peak()
+
+        t0 = time.perf_counter()
+        samples, duration = decode_audio(data, suffix)
+        t_decode = _ms(t0)
         t1 = time.perf_counter()
-        input_values, duration = preprocess_audio(processor, wav_path)
+        input_values = preprocess_audio(samples)
+        del samples
         t_preprocess = _ms(t1)
         t2 = time.perf_counter()
         result = model.predict(input_values)
         t_inference = _ms(t2)
-    finally:
-        os.unlink(wav_path)
+        peak = memory.peak_mb()
 
     analyzed = min(duration, config.MAX_LENGTH / config.SAMPLE_RATE)
     truncated = f" (only first {analyzed:.0f}s analysed)" if analyzed < duration else ""
@@ -102,7 +115,11 @@ def _run_inference(model: EmotionModel, processor, data: bytes, suffix: str) -> 
         f"V={result['valence']:.2f} A={result['arousal']:.2f} D={result['dominance']:.2f} | "
         f"trust={result['trust']:.2f} confidence={result['confidence']:.2f}"
     )
-    logger.info(f"Timings convert={t_convert:.0f}ms preprocess={t_preprocess:.0f}ms inference={t_inference:.0f}ms")
+    logger.info(f"Timings decode={t_decode:.0f}ms preprocess={t_preprocess:.0f}ms inference={t_inference:.0f}ms")
+    logger.info(
+        f"Memory before={memory.fmt(rss_before)} after={memory.fmt(memory.rss_mb())} "
+        f"peak={memory.fmt(peak)} (this request)"
+    )
     return result
 
 
@@ -129,7 +146,7 @@ async def predict_emotion(request: Request, file: UploadFile = File(...)):
     try:
         # Decoding and inference are blocking; keep them off the event loop.
         return await run_in_threadpool(
-            _run_inference, request.app.state.model, request.app.state.processor, data, suffix
+            _run_inference, request.app.state.model, data, suffix
         )
     except Exception as e:
         logger.exception(f"Prediction failed for '{filename}': {e}")

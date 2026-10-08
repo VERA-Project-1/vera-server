@@ -4,10 +4,10 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_DIR = BASE_DIR / "models" / "hubert_heads_test_7_lora"
 
-MODEL_PATH = Path(os.environ.get("MODEL_PATH", DEFAULT_MODEL_DIR / "hubert_emotion_vad_30hrs_jit.pt"))
+MODEL_PATH = Path(os.environ.get("MODEL_PATH", DEFAULT_MODEL_DIR / "hubert_emotion_vad_30hrs.onnx"))
 LABEL_ENCODER_PATH = Path(os.environ.get("LABEL_ENCODER_PATH", DEFAULT_MODEL_DIR / "label_encoder.pkl"))
-DEVICE = os.environ.get("DEVICE") or None  # None = auto (cuda if available)
-PROCESSOR_NAME = os.environ.get("PROCESSOR_NAME", "facebook/wav2vec2-base-960h")
+# CPU threads for inference. 1 keeps memory flat on small instances; raise it on bigger machines for speed.
+INFERENCE_THREADS = int(os.environ.get("INFERENCE_THREADS", "1"))
 
 SAMPLE_RATE = 16000
 MAX_LENGTH = SAMPLE_RATE * 8  # 8 second cap
